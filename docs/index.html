@@ -28,6 +28,16 @@ button:hover { filter:brightness(.94); }
 .word:first-of-type { border-top:0; }
 .word span:last-child { color:var(--muted); font-size:12px; }
 .hidden { display:none; }
+.prow { display:grid; grid-template-columns:1fr 220px 1fr; gap:10px; align-items:center; padding:5px 0; font-size:13px; }
+.prow .l { text-align:right; } .prow .r { text-align:left; }
+.prow .dim { color:#b9c2d0; } .prow .on { font-weight:700; }
+.bar { position:relative; height:14px; background:#eef1f6; border-radius:7px; }
+.bar::before { content:''; position:absolute; left:50%; top:-2px; bottom:-2px; width:1px; background:#8a94a6; }
+.fill { position:absolute; top:0; bottom:0; border-radius:7px; background:var(--accent); }
+.fill.neg { background:#d9822b; }
+.pval { text-align:center; color:var(--muted); font-size:11px; }
+details { margin-top:8px; } summary { cursor:pointer; color:var(--muted); font-size:13px; }
+@media(max-width:760px) { .prow { grid-template-columns:1fr 120px 1fr; font-size:12px; } }
 @media(max-width:760px) { .grid { grid-template-columns:1fr; } main { padding-top:20px; } }
 </style>
 </head>
@@ -46,6 +56,12 @@ button:hover { filter:brightness(.94); }
     <div id="error" class="error hidden"></div>
   </section>
   <section id="result" class="hidden">
+    <section class="card">
+      <h2>SD軸プロフィール</h2>
+      <p>sd2vec の50軸での得点(-3〜+3)です。右に伸びれば左側の語、左に伸びれば右側の語の印象に近いことを表します。絶対値の大きい軸を上位10件表示します。</p>
+      <div id="profile"></div>
+      <details><summary>残りの軸を表示</summary><div id="profile-rest"></div></details>
+    </section>
     <div class="grid">
       <div class="panel"><h3>sd2vec</h3><p>SD尺度ベースの評価的意味</p><div id="sd2vec"></div></div>
       <div class="panel"><h3>chiVe</h3><p>文脈的意味ベース</p><div id="chive"></div></div>
@@ -55,8 +71,8 @@ button:hover { filter:brightness(.94); }
 </main>
 <script>
 const $ = id => document.getElementById(id);
-// DATA: { words, index(Map), sd(Float32Array), w2v(Float32Array), sdDim, w2vDim }
-// sd / w2v は行ごとに L2 正規化済み。hybrid(連結)のコサイン類似度は (sd内積 + w2v内積) / 2 と等価。
+// DATA: { words, axes, index(Map), sdRaw(生得点), sd(正規化済み), w2v(正規化済み), sdDim, w2vDim }
+// hybrid(連結)のコサイン類似度は (sd内積 + w2v内積) / 2 と等価。
 let DATA = null;
 
 function decodeF16(buf) {
@@ -98,6 +114,27 @@ function renderList(id, results) {
     : '<p>該当する語はありません。</p>';
 }
 
+function profileRow(axis, v) {
+  const pct = Math.min(Math.abs(v) / 3, 1) * 50;
+  const fill = v >= 0
+    ? `<div class="fill" style="left:50%;width:${pct}%"></div>`
+    : `<div class="fill neg" style="right:50%;width:${pct}%"></div>`;
+  const cls = side => `${side} ${(side === 'l') === (v >= 0) ? 'on' : 'dim'}`;
+  return `<div class="prow"><span class="${cls('l')}">${axis.left}</span>`
+    + `<div><div class="bar">${fill}</div><div class="pval">${v >= 0 ? '+' : ''}${v.toFixed(2)}</div></div>`
+    + `<span class="${cls('r')}">${axis.right}</span></div>`;
+}
+
+// 語の SD 得点(正規化前)を、絶対値の大きい軸から順に表示する
+function renderProfile(query) {
+  const qi = DATA.index.get(query), d = DATA.sdDim;
+  const rows = DATA.axes
+    .map((axis, k) => ({ axis, v: DATA.sdRaw[qi * d + k] }))
+    .sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+  $('profile').innerHTML = rows.slice(0, 10).map(r => profileRow(r.axis, r.v)).join('');
+  $('profile-rest').innerHTML = rows.slice(10).map(r => profileRow(r.axis, r.v)).join('');
+}
+
 function search() {
   const q = $('query').value.trim();
   $('error').classList.add('hidden');
@@ -109,6 +146,7 @@ function search() {
     return;
   }
   $('result').classList.remove('hidden');
+  renderProfile(q);
   renderList('sd2vec', mostSimilar(q, 'sd2vec'));
   renderList('chive', mostSimilar(q, 'chive'));
   renderList('hybrid', mostSimilar(q, 'hybrid'));
@@ -124,16 +162,29 @@ $('query').addEventListener('input', () => {
 });
 $('query').addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
 
+function normalizeRows(mat, dim) {
+  const out = new Float32Array(mat.length);
+  for (let r = 0; r < mat.length / dim; r++) {
+    let n = 0;
+    for (let k = 0; k < dim; k++) n += mat[r * dim + k] ** 2;
+    n = Math.sqrt(n) || 1;
+    for (let k = 0; k < dim; k++) out[r * dim + k] = mat[r * dim + k] / n;
+  }
+  return out;
+}
+
 Promise.all([
   fetch('meta.json').then(r => r.json()),
   fetch('words.json').then(r => r.json()),
+  fetch('axes.json').then(r => r.json()),
   fetch('sd.f16').then(r => r.arrayBuffer()),
   fetch('w2v.f16').then(r => r.arrayBuffer()),
-]).then(([meta, words, sd, w2v]) => {
+]).then(([meta, words, axes, sd, w2v]) => {
+  const sdRaw = decodeF16(sd);
   DATA = {
-    words, sdDim: meta.sd_dim, w2vDim: meta.w2v_dim,
+    words, axes, sdDim: meta.sd_dim, w2vDim: meta.w2v_dim,
     index: new Map(words.map((w, i) => [w, i])),
-    sd: decodeF16(sd), w2v: decodeF16(w2v),
+    sdRaw, sd: normalizeRows(sdRaw, meta.sd_dim), w2v: decodeF16(w2v),
   };
   search();
 }).catch(err => {

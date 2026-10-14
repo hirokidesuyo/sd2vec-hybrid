@@ -1,13 +1,15 @@
 """GitHub Pages 用のデータを書き出す。
 
-SD ベクトルと chiVe ベクトルの共通語彙を、L2 正規化したうえで float16 バイナリとして
-docs/ に出力する。ハイブリッド(正規化済みベクトルの連結)のコサイン類似度は
-(SD内積 + chiVe内積) / 2 と等価なので、ブラウザ側で計算し、ここでは保存しない。
+SD ベクトルと chiVe ベクトルの共通語彙を float16 バイナリとして docs/ に出力する。
+SD は各軸の得点(-3〜3)をそのまま保存し、chiVe は L2 正規化して保存する。
+ハイブリッド(正規化済みベクトルの連結)のコサイン類似度は
+(SD内積 + chiVe内積) / 2 と等価なので、SD の正規化とあわせてブラウザ側で計算する。
 
 出力:
   words.json   語彙リスト
-  sd.f16       (N, sd_dim)  float16 行優先
-  w2v.f16      (N, w2v_dim) float16 行優先
+  axes.json    SD 軸の定義 [{"id", "left", "right"}]。得点が正なら left、負なら right
+  sd.f16       (N, sd_dim)  float16 行優先(正規化前の得点)
+  w2v.f16      (N, w2v_dim) float16 行優先(L2 正規化済み)
   meta.json    {"count", "sd_dim", "w2v_dim"}
 """
 import argparse
@@ -41,12 +43,19 @@ def main():
     if args.limit:
         words = words[: args.limit]
 
-    sd_mat = normalize_rows(np.stack([np.asarray(sd.get_vector(w)) for w in words]).astype(np.float32))
+    # SD は各軸の意味(-3〜3)を表示に使うため、正規化せず生の得点のまま保存する
+    sd_mat = np.stack([np.asarray(sd.get_vector(w)) for w in words]).astype(np.float32)
     w2v_mat = normalize_rows(np.stack([np.asarray(w2v[w]) for w in words]).astype(np.float32))
+
+    # 軸の定義。得点が正なら left、負なら right の印象に近い
+    metadata = json.loads((Path(args.sd) / "metadata.json").read_text(encoding="utf-8"))
+    axes = [{"id": d["id"], "left": d["left"], "right": d["right"]} for d in metadata["dimensions"]]
+    assert len(axes) == sd_mat.shape[1], "axes and SD vector dimension mismatch"
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     (out / "words.json").write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+    (out / "axes.json").write_text(json.dumps(axes, ensure_ascii=False), encoding="utf-8")
     sd_mat.astype("<f2").tofile(out / "sd.f16")
     w2v_mat.astype("<f2").tofile(out / "w2v.f16")
     (out / "meta.json").write_text(
