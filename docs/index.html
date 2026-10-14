@@ -55,22 +55,41 @@ button:hover { filter:brightness(.94); }
 </main>
 <script>
 const $ = id => document.getElementById(id);
+// DATA: { words, index(Map), sd(Float32Array), w2v(Float32Array), sdDim, w2vDim }
+// sd / w2v は行ごとに L2 正規化済み。hybrid(連結)のコサイン類似度は (sd内積 + w2v内積) / 2 と等価。
 let DATA = null;
 
-function cosine(a, b) {
-  const dot = a.reduce((s, v, i) => s + v * b[i], 0);
-  const na = Math.sqrt(a.reduce((s, v) => s + v * v, 0));
-  const nb = Math.sqrt(b.reduce((s, v) => s + v * v, 0));
-  return dot / (na * nb + 1e-8);
+function decodeF16(buf) {
+  const u16 = new Uint16Array(buf);
+  const out = new Float32Array(u16.length);
+  for (let i = 0; i < u16.length; i++) {
+    const h = u16[i], s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+    out[i] = e === 0 ? s * Math.pow(2, -14) * (f / 1024)
+           : e === 31 ? (f ? NaN : s * Infinity)
+           : s * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+  return out;
 }
 
-function mostSimilar(query, vectors, topn=10) {
-  const idx = DATA.words.indexOf(query);
-  if (idx === -1) return [];
-  const q = vectors[idx];
-  const scores = vectors.map((v, i) => ({ word: DATA.words[i], score: cosine(q, v) }));
-  scores.sort((a, b) => b.score - a.score);
-  return scores.filter(s => s.word !== query).slice(0, topn);
+function dotRow(mat, dim, qi, i) {
+  let s = 0;
+  const a = qi * dim, b = i * dim;
+  for (let k = 0; k < dim; k++) s += mat[a + k] * mat[b + k];
+  return s;
+}
+
+function mostSimilar(query, kind, topn=10) {
+  const qi = DATA.index.get(query);
+  if (qi === undefined) return [];
+  const n = DATA.words.length;
+  const scores = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const sd = kind === 'chive' ? 0 : dotRow(DATA.sd, DATA.sdDim, qi, i);
+    const w = kind === 'sd2vec' ? 0 : dotRow(DATA.w2v, DATA.w2vDim, qi, i);
+    scores[i] = kind === 'sd2vec' ? sd : kind === 'chive' ? w : (sd + w) / 2;
+  }
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => scores[b] - scores[a]);
+  return order.filter(i => i !== qi).slice(0, topn).map(i => ({ word: DATA.words[i], score: scores[i] }));
 }
 
 function renderList(id, results) {
@@ -83,25 +102,44 @@ function search() {
   const q = $('query').value.trim();
   $('error').classList.add('hidden');
   if (!DATA) return;
-  if (!DATA.words.includes(q)) {
-    $('error').textContent = `'${q}' はサンプル語彙に含まれていません。`;
+  if (!DATA.index.has(q)) {
+    $('error').textContent = `'${q}' は語彙(${DATA.words.length.toLocaleString()}語)に含まれていません。`;
     $('error').classList.remove('hidden');
     $('result').classList.add('hidden');
     return;
   }
   $('result').classList.remove('hidden');
-  renderList('sd2vec', mostSimilar(q, DATA.sd_vectors));
-  renderList('chive', mostSimilar(q, DATA.w2v_vectors));
-  renderList('hybrid', mostSimilar(q, DATA.hybrid_vectors));
+  renderList('sd2vec', mostSimilar(q, 'sd2vec'));
+  renderList('chive', mostSimilar(q, 'chive'));
+  renderList('hybrid', mostSimilar(q, 'hybrid'));
 }
 
-fetch('sample_data.json')
-  .then(r => r.json())
-  .then(data => {
-    DATA = data;
-    $('words').innerHTML = data.words.map(w => `<option value="${w}">`).join('');
-    search();
-  });
+// 1万語を datalist に全て入れると重いため、入力に前方一致する候補だけを最大50件表示する
+$('query').addEventListener('input', () => {
+  if (!DATA) return;
+  const p = $('query').value.trim();
+  $('words').innerHTML = p
+    ? DATA.words.filter(w => w.startsWith(p)).slice(0, 50).map(w => `<option value="${w}">`).join('')
+    : '';
+});
+$('query').addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+
+Promise.all([
+  fetch('meta.json').then(r => r.json()),
+  fetch('words.json').then(r => r.json()),
+  fetch('sd.f16').then(r => r.arrayBuffer()),
+  fetch('w2v.f16').then(r => r.arrayBuffer()),
+]).then(([meta, words, sd, w2v]) => {
+  DATA = {
+    words, sdDim: meta.sd_dim, w2vDim: meta.w2v_dim,
+    index: new Map(words.map((w, i) => [w, i])),
+    sd: decodeF16(sd), w2v: decodeF16(w2v),
+  };
+  search();
+}).catch(err => {
+  $('error').textContent = `データの読み込みに失敗しました: ${err}`;
+  $('error').classList.remove('hidden');
+});
 </script>
 </body>
 </html>
