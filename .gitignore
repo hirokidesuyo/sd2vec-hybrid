@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+data/
+*.npy
+*.kv
+*.kv.vectors.npy
+*.tar.gz
