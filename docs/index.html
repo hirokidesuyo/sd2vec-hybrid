@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sd2vec-hybrid 比較検索</title>
+<style>
+:root { color-scheme: light; --ink:#172033; --muted:#687386; --line:#dce2eb; --accent:#4263eb; --soft:#f5f7fb; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--soft); color:var(--ink); font-family:system-ui,-apple-system,"Segoe UI","Noto Sans JP",sans-serif; }
+main { max-width:1120px; margin:0 auto; padding:32px 18px 64px; }
+h1 { margin:0 0 8px; font-size:clamp(26px,4vw,40px); }
+h2 { margin:0 0 14px; font-size:20px; }
+p { color:var(--muted); line-height:1.7; }
+.hero { margin-bottom:24px; }
+.card { background:white; border:1px solid var(--line); border-radius:16px; padding:20px; margin:16px 0; box-shadow:0 4px 16px #1720330a; }
+.form { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
+label { display:block; color:var(--muted); font-size:13px; margin-bottom:6px; }
+input { width:200px; border:1px solid #b9c2d0; border-radius:9px; padding:12px; font-size:17px; }
+button { border:0; border-radius:9px; padding:12px 18px; background:var(--accent); color:white; cursor:pointer; font-size:15px; font-weight:600; }
+button:hover { filter:brightness(.94); }
+.error { background:#fff0f1; color:#a61e2b; border:1px solid #ffc9ce; padding:12px; border-radius:9px; }
+.grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+.panel { border:1px solid var(--line); border-radius:12px; padding:14px; }
+.panel h3 { margin:0 0 5px; font-size:16px; }
+.panel p { font-size:13px; margin:0 0 12px; }
+.word { padding:8px 0; border-top:1px solid var(--line); display:flex; justify-content:space-between; }
+.word:first-of-type { border-top:0; }
+.word span:last-child { color:var(--muted); font-size:12px; }
+.hidden { display:none; }
+@media(max-width:760px) { .grid { grid-template-columns:1fr; } main { padding-top:20px; } }
+</style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>sd2vec-hybrid 比較検索</h1>
+    <p>sd2vec（SD尺度）とchiVe（文脈的意味）を結合したハイブリッドベクトルの最近傍検索を比較します。</p>
+  </section>
+  <section class="card">
+    <div class="form">
+      <div><label for="query">検索語</label><input id="query" value="猫" list="words"></div>
+      <button onclick="search()">検索</button>
+    </div>
+    <datalist id="words"></datalist>
+    <div id="error" class="error hidden"></div>
+  </section>
+  <section id="result" class="hidden">
+    <div class="grid">
+      <div class="panel"><h3>sd2vec</h3><p>SD尺度ベースの評価的意味</p><div id="sd2vec"></div></div>
+      <div class="panel"><h3>chiVe</h3><p>文脈的意味ベース</p><div id="chive"></div></div>
+      <div class="panel"><h3>hybrid</h3><p>sd2vec + chiVe 結合</p><div id="hybrid"></div></div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let DATA = null;
+
+function cosine(a, b) {
+  const dot = a.reduce((s, v, i) => s + v * b[i], 0);
+  const na = Math.sqrt(a.reduce((s, v) => s + v * v, 0));
+  const nb = Math.sqrt(b.reduce((s, v) => s + v * v, 0));
+  return dot / (na * nb + 1e-8);
+}
+
+function mostSimilar(query, vectors, topn=10) {
+  const idx = DATA.words.indexOf(query);
+  if (idx === -1) return [];
+  const q = vectors[idx];
+  const scores = vectors.map((v, i) => ({ word: DATA.words[i], score: cosine(q, v) }));
+  scores.sort((a, b) => b.score - a.score);
+  return scores.filter(s => s.word !== query).slice(0, topn);
+}
+
+function renderList(id, results) {
+  $(id).innerHTML = results.length
+    ? results.map(r => `<div class="word"><span>${r.word}</span><span>${r.score.toFixed(4)}</span></div>`).join('')
+    : '<p>該当する語はありません。</p>';
+}
+
+function search() {
+  const q = $('query').value.trim();
+  $('error').classList.add('hidden');
+  if (!DATA) return;
+  if (!DATA.words.includes(q)) {
+    $('error').textContent = `'${q}' はサンプル語彙に含まれていません。`;
+    $('error').classList.remove('hidden');
+    $('result').classList.add('hidden');
+    return;
+  }
+  $('result').classList.remove('hidden');
+  renderList('sd2vec', mostSimilar(q, DATA.sd_vectors));
+  renderList('chive', mostSimilar(q, DATA.w2v_vectors));
+  renderList('hybrid', mostSimilar(q, DATA.hybrid_vectors));
+}
+
+fetch('sample_data.json')
+  .then(r => r.json())
+  .then(data => {
+    DATA = data;
+    $('words').innerHTML = data.words.map(w => `<option value="${w}">`).join('');
+    search();
+  });
+</script>
+</body>
+</html>
